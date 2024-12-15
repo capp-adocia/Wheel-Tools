@@ -30,19 +30,54 @@ void Session::do_read()
         [this, self](boost::system::error_code ec, std::size_t length) {
             if (!ec)
             {
-                _readBuf.WriteCompleted(length);
+                _readBuf.WriteCompleted(length); // 写指针后移，更新缓冲区
+                if (length < sizeof(uint16_t))
+                {
+                    // 如果小于两个字节，说明还没有将完整的数据包头读取到，继续读取
+                    do_read();
+                }
+                else
+                {
+                    while (_readBuf.GetActiveSize() > 0)
+                    {
+                        // 大于两个字节，说明已经读取到了数据包的长度，开始处理，先读取前两个字节的数据包长度
+                        uint16_t len;
+                        memcpy(&len, _readBuf.GetReadPointer(), sizeof(len));
+                        len = asio::detail::socket_ops::network_to_host_short(len); // 将网络字节序转换为主机字节序
+                        std::cout << len << "length : " << length << std::endl;
 
-                uint8_t* base = _readBuf.GetReadPointer(); // Get read pointer before advancing
-                _readBuf.ReadCompleted(length);
+                        if (length < 2 + len)
+                        {
+                            break; // 说明读取小于总长度，继续读取
+                        }
+                        else
+                        {
+                            // 说明读取长度大于等于总长度，说明已经读取到完整的数据包，还可能多读取了
+                            uint8_t* base = _readBuf.GetReadPointer();
+                            _readBuf.ReadCompleted(len + 2);
+                            self->Send(CommandType::Battle, base, len + 2);
+                            //std::cout << "_readBuf ptr" << _readBuf.GetActiveSize() << std::endl;
+                        }
+                        if (len + 2 > _readBuf.GetRemainingSpace()) // 如果数据包长度大于缓冲区剩余空间，说明缓冲区不够用
+                        {
+                            _readBuf.Normalize();
+                            _readBuf.EnsureFreeSpace();
+                        }
+                        // 如果数据包长度小于等于缓冲区剩余空间，说明缓冲区够用
+                            // 考虑读取的数据包长度小于等于长度，说明此时没有多读数据
+                        if (length > 2 + len) // 读取长度 说明多读了
+                        {
 
-                self->Send(CommandType::Battle, base, length);
-
-                std::cout << "do_read: length: " << length << std::endl;
-                do_read();
+                        }
+                    }
+                    do_read();
+                    
+                }
             }
             else
             {
                 do_close();
+                return;
             }
         }
     );
@@ -72,7 +107,6 @@ void Session::do_write()
                 do_close();
                 return;
             }
-
             buf.ReadCompleted(length); // Advance buffer
             if (!buf.GetActiveSize())
             {
@@ -102,9 +136,8 @@ void Session::do_close()
 void Session::Send(const CommandType type, const uint8_t* msg, std::size_t len)
 {
     MessageBuffer buf(len);
-    //buf.Write(reinterpret_cast<const char*>(&type), sizeof(type));
-    buf.Write(msg, len); // Write message payload
+    buf.Write(msg, 2);
+    buf.Write(msg + 2, len - 2);
     _writeQueue.push(std::move(buf));
-
     do_write();
 }
